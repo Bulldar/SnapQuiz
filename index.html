@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SnapQuiz">
+<meta name="theme-color" content="#000000">
+<title>SnapQuiz</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; background: #000; color: #fff; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .screen { position: fixed; inset: 0; display: none; flex-direction: column; }
+  .show { display: flex; }
+
+  /* start */
+  #start { background: #000; align-items: center; justify-content: center; gap: 24px; padding: 24px; text-align: center; }
+  #start h1 { font-size: 40px; }
+  #start p { font-size: 20px; color: #aaa; max-width: 340px; }
+
+  /* scanning status */
+  #status { position: fixed; left: 0; right: 0; bottom: 0; padding: 22px 16px calc(22px + env(safe-area-inset-bottom));
+    background: rgba(0,0,0,.75); font-size: 26px; font-weight: 700; text-align: center; display: none; }
+  #status.show { display: block; }
+  #status .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #ffd400;
+    margin-right: 10px; vertical-align: middle; }
+  #status.reading .dot { background: #3ea6ff; animation: pulse .8s infinite alternate; }
+  #status.ready .dot { background: #2ecc40; }
+  @keyframes pulse { to { opacity: .2; } }
+
+  /* answer */
+  #answer { background: #000; padding: 20px 16px calc(16px + env(safe-area-inset-bottom)); }
+  #answerLabel { font-size: 22px; color: #888; text-align: center; padding-top: env(safe-area-inset-top); }
+  #answerText { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center;
+    font-weight: 900; line-height: 1.05; word-break: break-word; color: #2ecc40; }
+  #questionText { font-size: 18px; color: #777; text-align: center; margin-bottom: 16px; }
+
+  .bigbtn { width: 100%; border: 0; border-radius: 22px; font-size: 44px; font-weight: 900; color: #fff;
+    padding: 34px 0; background: #2ecc40; }
+  .bigbtn:active { transform: scale(.98); filter: brightness(.9); }
+  #startBtn { background: #3ea6ff; max-width: 420px; }
+
+  #sound { position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 12px; z-index: 5; display: none;
+    width: 56px; height: 56px; border-radius: 50%; border: 0; font-size: 28px; background: rgba(0,0,0,.6); }
+  #sound.show { display: block; }
+</style>
+</head>
+<body>
+
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="small" width="48" height="36" hidden></canvas>
+<canvas id="big" hidden></canvas>
+
+<div id="start" class="screen show">
+  <h1>SnapQuiz</h1>
+  <p>Prop your phone up, point it at the question, and the answer pops up.</p>
+  <button id="startBtn" class="bigbtn">START</button>
+  <p id="startErr" style="color:#ff5a5a"></p>
+</div>
+
+<div id="status"><span class="dot"></span><span id="statusText">Point at a question</span></div>
+
+<div id="answer" class="screen">
+  <div id="answerLabel">ANSWER</div>
+  <div id="answerText"></div>
+  <div id="questionText"></div>
+  <button id="doneBtn" class="bigbtn">DONE</button>
+</div>
+
+<button id="sound" title="Read answer out loud">🔇</button>
+
+<script>
+// key comes from the link once, then is remembered (so a home-screen icon works too)
+let KEY = new URLSearchParams(location.search).get("k") || "";
+try { if (KEY) localStorage.setItem("k", KEY); else KEY = localStorage.getItem("k") || ""; } catch {}
+const $ = (id) => document.getElementById(id);
+const video = $("cam"), small = $("small"), big = $("big");
+const sctx = small.getContext("2d", { willReadFrequently: true });
+
+let stream = null, wakeLock = null;
+let mode = "start";          // start | scan | answer
+let busy = false;
+let prevThumb = null, stableCount = 0;
+let lastSentThumb = null, lastSentAt = 0;
+let last = null;             // last shown { question, answer }
+let speak = false;
+try { speak = localStorage.getItem("speak") === "1"; } catch {}
+
+// ---------- camera ----------
+async function startCamera() {
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible" || mode === "start") return;
+  keepAwake();
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track || track.readyState === "ended") { try { await startCamera(); } catch {} }
+});
+
+// ---------- status ----------
+function setStatus(text, kind = "") {
+  $("statusText").textContent = text;
+  $("status").className = "show " + kind;
+}
+
+// ---------- frame helpers ----------
+function thumb() {
+  sctx.drawImage(video, 0, 0, 48, 36);
+  const d = sctx.getImageData(0, 0, 48, 36).data;
+  const g = new Uint8Array(48 * 36);
+  for (let i = 0; i < g.length; i++) g[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+  return g;
+}
+function diff(a, b) {
+  if (!a || !b) return 255;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+  return s / a.length;
+}
+function grabJpeg() {
+  const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+  big.width = Math.round(video.videoWidth * scale);
+  big.height = Math.round(video.videoHeight * scale);
+  big.getContext("2d").drawImage(video, 0, 0, big.width, big.height);
+  return big.toDataURL("image/jpeg", 0.85).split(",")[1];
+}
+
+// ---------- same question again? ----------
+function words(s) { return new Set(s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean)); }
+function sameAsLast(r) {
+  if (!last) return false;
+  if (r.answer.trim().toLowerCase() !== last.answer.trim().toLowerCase()) return false;
+  const a = words(r.question), b = words(last.question);
+  const inter = [...a].filter((w) => b.has(w)).length;
+  const union = new Set([...a, ...b]).size || 1;
+  return inter / union >= 0.5;
+}
+
+// ---------- main scan loop ----------
+async function tick() {
+  if (mode !== "scan" || busy || !video.videoWidth) return;
+  const t = thumb();
+  const motion = diff(t, prevThumb);
+  prevThumb = t;
+
+  if (motion > 7) { stableCount = 0; setStatus("Hold still…"); return; }
+  if (++stableCount < 4) return;                       // ~1.2s steady
+  const now = Date.now();
+  if (now - lastSentAt < 2000) return;
+  // nothing changed since the last try? don't re-send for a bit
+  if (diff(t, lastSentThumb) < 3 && now - lastSentAt < 8000) return;
+
+  busy = true;
+  setStatus("Reading…", "reading");
+  lastSentThumb = t;
+  lastSentAt = now;
+  try {
+    const res = await fetch("/solve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-key": KEY },
+      body: JSON.stringify({ image: grabJpeg() }),
+    });
+    if (res.status === 403) { setStatus("Bad link — rescan the QR code"); return; }
+    const r = await res.json();
+    if (r.error) throw new Error(r.error);
+    if (mode !== "scan") return;
+    if (r.found && r.answer && !sameAsLast(r)) showAnswer(r);
+    else setStatus(last ? "Point at the next question" : "Point at a question", "ready");
+  } catch (e) {
+    setStatus("Connection problem — retrying");
+  } finally {
+    busy = false;
+  }
+}
+
+// ---------- answer screen ----------
+function showAnswer(r) {
+  last = r;
+  mode = "answer";
+  const len = r.answer.length;
+  $("answerText").style.fontSize = len <= 3 ? "45vw" : len <= 10 ? "16vw" : len <= 25 ? "11vw" : len <= 60 ? "8vw" : "6vw";
+  $("answerText").textContent = r.answer;
+  $("questionText").textContent = r.question;
+  $("status").className = "";
+  $("answer").classList.add("show");
+  if (navigator.vibrate) navigator.vibrate(120);
+  if (speak && window.speechSynthesis) {
+    speechSynthesis.cancel();
+    speechSynthesis.speak(new SpeechSynthesisUtterance(r.answer.replace(/\s+-\s+/, ", ")));
+  }
+}
+
+$("doneBtn").onclick = () => {
+  window.speechSynthesis?.cancel();
+  $("answer").classList.remove("show");
+  mode = "scan";
+  stableCount = 0;
+  prevThumb = null;
+  lastSentAt = Date.now() - 1000;   // short breather before the next scan
+  setStatus("Point at the next question", "ready");
+};
+
+// ---------- sound toggle ----------
+function drawSound() { $("sound").textContent = speak ? "🔊" : "🔇"; }
+$("sound").onclick = () => {
+  speak = !speak;
+  try { localStorage.setItem("speak", speak ? "1" : "0"); } catch {}
+  drawSound();
+};
+
+// ---------- start ----------
+$("startBtn").onclick = async () => {
+  $("startErr").textContent = "";
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    $("startErr").textContent = "Camera needs the https:// link.";
+    return;
+  }
+  try {
+    await startCamera();
+  } catch (e) {
+    $("startErr").textContent = "Camera blocked. Allow camera access for this site, then tap START again.";
+    return;
+  }
+  if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance("")); // unlocks audio on iPhone
+  keepAwake();
+  $("start").classList.remove("show");
+  $("sound").classList.add("show");
+  drawSound();
+  mode = "scan";
+  setStatus("Point at a question", "ready");
+  setInterval(tick, 300);
+};
+</script>
+</body>
+</html>

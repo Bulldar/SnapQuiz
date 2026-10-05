@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: SnapQuiz
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ACCESS_KEY
+        sync: false
