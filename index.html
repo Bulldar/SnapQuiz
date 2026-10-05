@@ -41,6 +41,8 @@
     padding: 34px 0; background: #2ecc40; }
   .bigbtn:active { transform: scale(.98); filter: brightness(.9); }
   #startBtn { background: #3ea6ff; max-width: 420px; }
+  #codeInput { width: 100%; max-width: 420px; padding: 22px; font-size: 28px; text-align: center; border-radius: 16px;
+    border: 3px solid #3ea6ff; background: #111; color: #fff; }
 
   #sound { position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 12px; z-index: 5; display: none;
     width: 56px; height: 56px; border-radius: 50%; border: 0; font-size: 28px; background: rgba(0,0,0,.6); }
@@ -56,6 +58,7 @@
 <div id="start" class="screen show">
   <h1>SnapQuiz</h1>
   <p>Prop your phone up, point it at the question, and the answer pops up.</p>
+  <input id="codeInput" type="text" placeholder="Access code" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" hidden>
   <button id="startBtn" class="bigbtn">START</button>
   <p id="startErr" style="color:#ff5a5a"></p>
 </div>
@@ -79,7 +82,7 @@ const $ = (id) => document.getElementById(id);
 const video = $("cam"), small = $("small"), big = $("big");
 const sctx = small.getContext("2d", { willReadFrequently: true });
 
-let stream = null, wakeLock = null;
+let stream = null, wakeLock = null, ticker = null;
 let mode = "start";          // start | scan | answer
 let busy = false;
 let prevThumb = null, stableCount = 0;
@@ -172,7 +175,7 @@ async function tick() {
       headers: { "Content-Type": "application/json", "x-key": KEY },
       body: JSON.stringify({ image: grabJpeg() }),
     });
-    if (res.status === 403) { setStatus("Bad link — rescan the QR code"); return; }
+    if (res.status === 403) { askForCode("That access code didn't work. Enter it again."); return; }
     const r = await res.json();
     if (r.error) throw new Error(r.error);
     if (mode !== "scan") return;
@@ -221,14 +224,31 @@ $("sound").onclick = () => {
 };
 
 // ---------- start ----------
+function askForCode(msg) {
+  KEY = "";
+  try { localStorage.removeItem("k"); } catch {}
+  mode = "start";
+  $("status").className = "";
+  $("sound").classList.remove("show");
+  $("start").classList.add("show");
+  $("codeInput").hidden = false;
+  $("codeInput").value = "";
+  $("startErr").textContent = msg;
+}
+
 $("startBtn").onclick = async () => {
   $("startErr").textContent = "";
+  if (!$("codeInput").hidden) {
+    KEY = $("codeInput").value.trim();
+    if (KEY) { try { localStorage.setItem("k", KEY); } catch {} }
+  }
+  if (!KEY) { askForCode("Enter your access code."); return; }
   if (!window.isSecureContext || !navigator.mediaDevices) {
     $("startErr").textContent = "Camera needs the https:// link.";
     return;
   }
   try {
-    await startCamera();
+    if (!stream) await startCamera();
   } catch (e) {
     $("startErr").textContent = "Camera blocked. Allow camera access for this site, then tap START again.";
     return;
@@ -240,7 +260,7 @@ $("startBtn").onclick = async () => {
   drawSound();
   mode = "scan";
   setStatus("Point at a question", "ready");
-  setInterval(tick, 300);
+  if (!ticker) ticker = setInterval(tick, 300);
 };
 </script>
 </body>
