@@ -22,6 +22,8 @@ for (const entry of (process.env.ACCESS_CODES || "").split(/[,;\n]+/)) {
   const [code, name, limit] = entry.split(":").map((x) => x.trim());
   if (code) addCode(code, name || code, Number(limit) || DEFAULT_LIMIT);
 }
+const leftOf = (c) => (c.limit === Infinity ? null : Math.max(0, c.limit - (c.day === today() ? c.used : 0)));
+function refund(c) { if (c.used > 0) c.used--; if (c.total > 0) c.total--; } // failed / empty reads don't cost the customer
 function useCode(code) {
   const c = codes.get(code);
   if (!c) return { status: 403 };
@@ -89,6 +91,13 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end((rows.join("\n") || "no customer codes yet") + "\n(counts reset when the server restarts)\n");
   }
+  if (req.method === "GET" && req.url === "/me") {
+    const c = codes.get(req.headers["x-key"]);
+    if (!c) { res.writeHead(403); return res.end(); }
+    if (c.day !== today()) { c.day = today(); c.used = 0; }
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    return res.end(JSON.stringify({ name: c.name, left: leftOf(c) }));
+  }
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200);
     return res.end("ok");
@@ -104,10 +113,12 @@ const server = http.createServer(async (req, res) => {
     try {
       const { image } = JSON.parse(Buffer.concat(chunks).toString());
       const result = await solve(image);
+      if (!result.found) refund(auth.c);
       if (result.found) console.log(`  OK  [${auth.c.name}]  ${result.question}  ->  ${result.answer}`);
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify(result));
+      return res.end(JSON.stringify({ ...result, left: leftOf(auth.c) }));
     } catch (err) {
+      refund(auth.c);
       console.error("  ERROR solve failed:", err.message);
       res.writeHead(500, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: err.message }));

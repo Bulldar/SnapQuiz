@@ -32,7 +32,7 @@
 
   /* answer */
   #answer { background: #000; padding: 20px 16px calc(16px + env(safe-area-inset-bottom)); }
-  #answerLabel { font-size: 22px; color: #888; text-align: center; padding-top: env(safe-area-inset-top); }
+  #answerLabel { min-height: 64px; font-size: 22px; color: #888; text-align: center; padding-top: env(safe-area-inset-top); }
   #answerText { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center;
     font-weight: 900; line-height: 1.05; word-break: break-word; color: #2ecc40; }
   #questionText { font-size: 18px; color: #777; text-align: center; margin-bottom: 16px; }
@@ -44,6 +44,12 @@
   #codeInput { width: 100%; max-width: 420px; padding: 22px; font-size: 28px; text-align: center; border-radius: 16px;
     border: 3px solid #3ea6ff; background: #111; color: #fff; }
 
+  #ticker { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 12px; z-index: 5; display: none;
+    padding: 10px 16px; border-radius: 28px; background: rgba(0,0,0,.65); border: 2px solid #2ecc40;
+    font-size: 20px; font-weight: 800; color: #fff; }
+  #ticker.show { display: block; }
+  #ticker.low { border-color: #ffd400; }
+  #ticker.out { border-color: #ff5a5a; color: #ff5a5a; }
   #sound { position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 12px; z-index: 5; display: none;
     width: 56px; height: 56px; border-radius: 50%; border: 0; font-size: 28px; background: rgba(0,0,0,.6); }
   #sound.show { display: block; }
@@ -66,12 +72,13 @@
 <div id="status"><span class="dot"></span><span id="statusText">Point at a question</span></div>
 
 <div id="answer" class="screen">
-  <div id="answerLabel">ANSWER</div>
+  <div id="answerLabel"></div>
   <div id="answerText"></div>
   <div id="questionText"></div>
   <button id="doneBtn" class="bigbtn">DONE</button>
 </div>
 
+<div id="ticker"></div>
 <button id="sound" title="Read answer out loud">🔇</button>
 
 <script>
@@ -88,6 +95,7 @@ let busy = false;
 let prevThumb = null, stableCount = 0;
 let lastSentThumb = null, lastSentAt = 0;
 let last = null;             // last shown { question, answer }
+let lastWasEmpty = false, retried = false;   // for not re-sending an unchanged view
 let speak = true;
 try { speak = localStorage.getItem("speak") !== "0"; } catch {}
 let utter = null;   // keep a reference or Chrome can drop the speech
@@ -122,6 +130,22 @@ document.addEventListener("visibilitychange", async () => {
   const track = stream && stream.getVideoTracks()[0];
   if (!track || track.readyState === "ended") { try { await startCamera(); } catch {} }
 });
+
+// ---------- scans left ----------
+function setLeft(n) {
+  if (n === undefined) return;
+  const el = $("ticker");
+  el.textContent = n === null ? "Unlimited" : n + (n === 1 ? " scan left" : " scans left");
+  el.className = "show" + (n === 0 ? " out" : n !== null && n <= 10 ? " low" : "");
+}
+async function refreshLeft() {
+  if (!KEY) return;
+  try {
+    const r = await fetch("/me", { headers: { "x-key": KEY } });
+    if (r.status === 403) { askForCode("That access code didn't work. Enter it again."); return; }
+    if (r.ok) setLeft((await r.json()).left);
+  } catch {}
+}
 
 // ---------- status ----------
 function setStatus(text, kind = "") {
@@ -173,8 +197,11 @@ async function tick() {
   if (++stableCount < 4) return;                       // ~1.2s steady
   const now = Date.now();
   if (now - lastSentAt < 2000) return;
-  // nothing changed since the last try? don't re-send for a bit
-  if (diff(t, lastSentThumb) < 3 && now - lastSentAt < 8000) return;
+  // same view as the last read? don't re-send (saves scans); allow one retry after an empty read
+  if (diff(t, lastSentThumb) < 3) {
+    if (!lastWasEmpty || retried || now - lastSentAt < 5000) return;
+    retried = true;
+  } else retried = false;
 
   busy = true;
   setStatus("Reading…", "reading");
@@ -186,14 +213,16 @@ async function tick() {
       headers: { "Content-Type": "application/json", "x-key": KEY },
       body: JSON.stringify({ image: grabJpeg() }),
     });
-    if (res.status === 429) { setStatus("Daily limit reached - try again tomorrow"); lastSentAt = Date.now() + 3600000; return; }
+    if (res.status === 429) { setLeft(0); setStatus("Daily limit reached - try again tomorrow"); lastSentAt = Date.now() + 3600000; return; }
     if (res.status === 403) { askForCode("That access code didn't work. Enter it again."); return; }
     const r = await res.json();
     if (r.error) throw new Error(r.error);
+    setLeft(r.left); lastWasEmpty = !(r.found && r.answer);
     if (mode !== "scan") return;
     if (r.found && r.answer && !sameAsLast(r)) showAnswer(r);
     else setStatus(last ? "Point at the next question" : "Point at a question", "ready");
   } catch (e) {
+    lastWasEmpty = true;
     setStatus("Connection problem — retrying");
   } finally {
     busy = false;
@@ -235,6 +264,7 @@ $("sound").onclick = () => {
 
 // ---------- start ----------
 function askForCode(msg) {
+  $("ticker").className = "";
   KEY = "";
   try { localStorage.removeItem("k"); } catch {}
   mode = "start";
@@ -253,6 +283,7 @@ $("startBtn").onclick = async () => {
     if (KEY) { try { localStorage.setItem("k", KEY); } catch {} }
   }
   if (!KEY) { askForCode("Enter your access code."); return; }
+  refreshLeft();
   if (speak) say("Sound on");   // must happen inside the tap or phones keep audio blocked
   if (!window.isSecureContext || !navigator.mediaDevices) {
     $("startErr").textContent = "Camera needs the https:// link.";
@@ -272,6 +303,7 @@ $("startBtn").onclick = async () => {
   setStatus("Point at a question", "ready");
   if (!ticker) ticker = setInterval(tick, 300);
 };
+refreshLeft();
 </script>
 </body>
 </html>
