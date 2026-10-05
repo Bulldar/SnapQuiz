@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import qrcode from "qrcode-terminal";
 
-const ON_RENDER = !!process.env.RENDER;
+const ON_RENDER = !!process.env.RENDER || process.platform !== "win32";
 const PORT = Number(process.env.PORT) || 3434;
 // Keeps strangers off your API key. Set ACCESS_KEY to keep the same link across restarts.
 const KEY = process.env.ACCESS_KEY || crypto.randomBytes(6).toString("hex");

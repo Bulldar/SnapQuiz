@@ -1,9 +1,7 @@
 services:
   - type: web
     name: SnapQuiz
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
+    runtime: docker
     healthCheckPath: /health
     envVars:
       - key: ANTHROPIC_API_KEY
