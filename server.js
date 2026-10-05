@@ -10,8 +10,26 @@ import qrcode from "qrcode-terminal";
 
 const ON_RENDER = !!process.env.RENDER || process.platform !== "win32";
 const PORT = Number(process.env.PORT) || 3434;
-// Keeps strangers off your API key. Set ACCESS_KEY to keep the same link across restarts.
+// ACCESS_KEY is the owner code (unlimited). ACCESS_CODES adds customer codes:
+//   ACCESS_CODES="alice77:Alice:200, bob99:Bob"   ->  code:Name:scansPerDay (limit optional)
 const KEY = process.env.ACCESS_KEY || crypto.randomBytes(6).toString("hex");
+const DEFAULT_LIMIT = Number(process.env.DEFAULT_DAILY_LIMIT) || 300;
+const today = () => new Date().toISOString().slice(0, 10);
+const codes = new Map(); // code -> { name, limit, day, used, total }
+const addCode = (code, name, limit) => codes.set(code, { name, limit, day: today(), used: 0, total: 0 });
+addCode(KEY, "owner", Infinity);
+for (const entry of (process.env.ACCESS_CODES || "").split(/[,;\n]+/)) {
+  const [code, name, limit] = entry.split(":").map((x) => x.trim());
+  if (code) addCode(code, name || code, Number(limit) || DEFAULT_LIMIT);
+}
+function useCode(code) {
+  const c = codes.get(code);
+  if (!c) return { status: 403 };
+  if (c.day !== today()) { c.day = today(); c.used = 0; }
+  if (c.used >= c.limit) return { status: 429, c };
+  c.used++; c.total++;
+  return { status: 200, c };
+}
 const CLOUDFLARED = "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe";
 const PAGE = fs.readFileSync(new URL("./index.html", import.meta.url));
 
@@ -63,21 +81,30 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(PAGE);
   }
+  if (req.method === "GET" && req.url.startsWith("/usage")) {
+    // owner-only: /usage?k=<ACCESS_KEY>
+    if (new URL(req.url, "http://x").searchParams.get("k") !== KEY) { res.writeHead(403); return res.end("owner only"); }
+    const rows = [...codes.entries()].filter(([code]) => code !== KEY).map(([code, c]) =>
+      `${c.name.padEnd(16)} code=${code.padEnd(14)} today=${c.day === today() ? c.used : 0}/${c.limit}  total=${c.total}`);
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end((rows.join("\n") || "no customer codes yet") + "\n(counts reset when the server restarts)\n");
+  }
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200);
     return res.end("ok");
   }
   if (req.method === "POST" && req.url === "/solve") {
-    if (req.headers["x-key"] !== KEY) {
-      res.writeHead(403);
-      return res.end("bad key");
+    const auth = useCode(req.headers["x-key"]);
+    if (auth.status !== 200) {
+      res.writeHead(auth.status);
+      return res.end(auth.status === 429 ? "daily limit" : "bad key");
     }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     try {
       const { image } = JSON.parse(Buffer.concat(chunks).toString());
       const result = await solve(image);
-      if (result.found) console.log(`  OK  ${result.question}  ->  ${result.answer}`);
+      if (result.found) console.log(`  OK  [${auth.c.name}]  ${result.question}  ->  ${result.answer}`);
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(result));
     } catch (err) {

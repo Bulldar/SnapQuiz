@@ -175,6 +175,7 @@ async function tick() {
       headers: { "Content-Type": "application/json", "x-key": KEY },
       body: JSON.stringify({ image: grabJpeg() }),
     });
+    if (res.status === 429) { setStatus("Daily limit reached - try again tomorrow"); lastSentAt = Date.now() + 3600000; return; }
     if (res.status === 403) { askForCode("That access code didn't work. Enter it again."); return; }
     const r = await res.json();
     if (r.error) throw new Error(r.error);
