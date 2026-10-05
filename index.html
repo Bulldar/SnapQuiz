@@ -88,8 +88,19 @@ let busy = false;
 let prevThumb = null, stableCount = 0;
 let lastSentThumb = null, lastSentAt = 0;
 let last = null;             // last shown { question, answer }
-let speak = false;
-try { speak = localStorage.getItem("speak") === "1"; } catch {}
+let speak = true;
+try { speak = localStorage.getItem("speak") !== "0"; } catch {}
+let utter = null;   // keep a reference or Chrome can drop the speech
+function say(text) {
+  if (!window.speechSynthesis) return;
+  try {
+    speechSynthesis.cancel();
+    speechSynthesis.resume();
+    utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "en-US"; utter.rate = 0.95; utter.volume = 1;
+    speechSynthesis.speak(utter);
+  } catch {}
+}
 
 // ---------- camera ----------
 async function startCamera() {
@@ -200,10 +211,7 @@ function showAnswer(r) {
   $("status").className = "";
   $("answer").classList.add("show");
   if (navigator.vibrate) navigator.vibrate(120);
-  if (speak && window.speechSynthesis) {
-    speechSynthesis.cancel();
-    speechSynthesis.speak(new SpeechSynthesisUtterance(r.answer.replace(/\s+-\s+/, ", ")));
-  }
+  if (speak) say(r.answer.replace(/\s+-\s+/, ", "));
 }
 
 $("doneBtn").onclick = () => {
@@ -221,6 +229,7 @@ function drawSound() { $("sound").textContent = speak ? "🔊" : "🔇"; }
 $("sound").onclick = () => {
   speak = !speak;
   try { localStorage.setItem("speak", speak ? "1" : "0"); } catch {}
+  if (speak) say("Sound on"); else window.speechSynthesis?.cancel();
   drawSound();
 };
 
@@ -244,6 +253,7 @@ $("startBtn").onclick = async () => {
     if (KEY) { try { localStorage.setItem("k", KEY); } catch {} }
   }
   if (!KEY) { askForCode("Enter your access code."); return; }
+  if (speak) say("Sound on");   // must happen inside the tap or phones keep audio blocked
   if (!window.isSecureContext || !navigator.mediaDevices) {
     $("startErr").textContent = "Camera needs the https:// link.";
     return;
@@ -254,7 +264,6 @@ $("startBtn").onclick = async () => {
     $("startErr").textContent = "Camera blocked. Allow camera access for this site, then tap START again.";
     return;
   }
-  if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance("")); // unlocks audio on iPhone
   keepAwake();
   $("start").classList.remove("show");
   $("sound").classList.add("show");
